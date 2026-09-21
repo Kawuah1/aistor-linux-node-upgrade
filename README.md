@@ -1,4 +1,4 @@
-# Legacy MinIO to AIStor: two-node Linux upgrade
+# Legacy MinIO to AIStor: Linux cluster upgrade
 
 This folder is a manual alternative to the existing AWX playbook. It follows
 MinIO's Linux upgrade sequence: export metadata, replace the binary on every
@@ -38,7 +38,7 @@ Confirm the directory contains these artifacts and copy it off the control
 host: `minio-config-export.txt`, `legacy-minio-bucket-metadata.zip`, and
 `legacy-minio-iam-info.zip` (the exact prefix is your `MC_ALIAS`).
 
-Then run the following on **each of the two MinIO nodes**. It verifies the
+Then run the following on **every MinIO node**. It verifies the
 service is active, saves a timestamped local copy of the old binary, downloads
 or uses your supplied AIStor binary, and replaces the binary without a restart.
 
@@ -82,13 +82,18 @@ Official procedure: <https://docs.min.io/aistor/administration/upgrade-aistor-se
 ## Ansible alternative
 
 `playbook.yaml` implements the same sequence without configuring `mc` or
-aliases. Create an inventory with both target nodes in a `minio` group, then
-run the playbook as the local user that already owns the configured `mc` alias:
+aliases. It operates on every host in the `minio` inventory group: use the same
+file for a two-node, four-node, or larger cluster. Create an inventory with all
+target nodes in that group, then run the playbook as the local user that already
+owns the configured `mc` alias:
 
 ```ini
 [minio]
 minio-node-1 ansible_host=192.0.2.10
 minio-node-2 ansible_host=192.0.2.11
+# Add every remaining cluster node, for example:
+# minio-node-3 ansible_host=192.0.2.12
+# minio-node-4 ansible_host=192.0.2.13
 ```
 
 ```sh
