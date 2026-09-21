@@ -34,18 +34,9 @@
     # timestamped final directory are created during the backup phase.
     aistor_backup_dir: "/var/backups/minio-to-aistor-{{ ansible_date_time.iso8601_basic_short }}"
 
-    # Binary selection order:
-    # 1. aistor_binary_file (pre-approved local file on the CONTROL host)
-    # 2. aistor_binary_url (downloaded by each TARGET node)
-    # 3. the MinIO AIStor URL derived from each target architecture
-    aistor_binary_file: ""
+    # Required: the approved MinIO AIStor binary URL. Each target node
+    # downloads this exact URL directly during the install phase.
     aistor_binary_url: ""
-    aistor_arch_map:
-      x86_64: linux-amd64
-      aarch64: linux-arm64
-      arm64: linux-arm64
-    aistor_download_arch: "{{ aistor_arch_map.get(ansible_architecture, '') }}"
-    aistor_default_binary_url: "https://dl.min.io/aistor/minio/release/{{ aistor_download_arch }}/minio"
 
     # Required only in restart-and-license/all mode; this file is on
     # aistor_mc_control_host and is registered via mc cluster-wide.
@@ -166,10 +157,11 @@
       when: aistor_upgrade_phase in ['all', 'backup']
 
   tasks:
-    - name: Verify node architecture is supported
+    - name: Require explicit AIStor binary URL
       ansible.builtin.assert:
-        that: aistor_download_arch | length > 0
-        fail_msg: "Unsupported architecture {{ ansible_architecture }} on {{ inventory_hostname }}."
+        that: aistor_binary_url | length > 0
+        fail_msg: "Set aistor_binary_url to the approved AIStor binary URL."
+      run_once: true
       when: aistor_upgrade_phase in ['all', 'install-binary']
 
     - name: Check legacy MinIO service is running
@@ -186,47 +178,14 @@
       changed_when: false
       when: aistor_upgrade_phase in ['all', 'install-binary']
 
-    - name: Verify pre-approved local AIStor binary
-      ansible.builtin.stat:
-        path: "{{ aistor_binary_file }}"
-      register: aistor_binary_file_stat
-      delegate_to: localhost
-      run_once: true
-      when:
-        - aistor_upgrade_phase in ['all', 'install-binary']
-        - aistor_binary_file | length > 0
-
-    - name: Require readable pre-approved local AIStor binary
-      ansible.builtin.assert:
-        that: aistor_binary_file_stat.stat.exists and aistor_binary_file_stat.stat.readable
-        fail_msg: "Cannot read aistor_binary_file on the Ansible control host."
-      delegate_to: localhost
-      run_once: true
-      when:
-        - aistor_upgrade_phase in ['all', 'install-binary']
-        - aistor_binary_file | length > 0
-
-    - name: Copy pre-approved AIStor binary to nodes
-      ansible.builtin.copy:
-        src: "{{ aistor_binary_file }}"
-        dest: /tmp/aistor-minio
-        owner: root
-        group: root
-        mode: "0755"
-      when:
-        - aistor_upgrade_phase in ['all', 'install-binary']
-        - aistor_binary_file | length > 0
-
     - name: Download AIStor binary to nodes
       ansible.builtin.get_url:
-        url: "{{ aistor_binary_url if aistor_binary_url | length > 0 else aistor_default_binary_url }}"
+        url: "{{ aistor_binary_url }}"
         dest: /tmp/aistor-minio
         owner: root
         group: root
         mode: "0755"
-      when:
-        - aistor_upgrade_phase in ['all', 'install-binary']
-        - aistor_binary_file | length == 0
+      when: aistor_upgrade_phase in ['all', 'install-binary']
 
     - name: Validate downloaded AIStor binary
       ansible.builtin.command:

@@ -101,15 +101,16 @@ sudo ansible-playbook -i inventory.ini playbook.yaml \
   -e aistor_upgrade_confirm_permanent=true \
   -e aistor_mc_control_host=minio-node-1 \
   -e mc_alias=legacy-minio \
+  -e aistor_binary_url=https://dl.min.io/aistor/minio/release/linux-amd64/minio \
   -e aistor_license_file=/secure/minio.license \
   -e aistor_backup_dir=/secure/backups/minio-to-aistor
 ```
 
 By default this runs all phases. To run them in separate maintenance-window
 steps, add `-e aistor_upgrade_phase=backup`, then `install-binary`, and finally
-`restart-and-license`. `aistor_binary_file` takes precedence over
-`aistor_binary_url`; otherwise each node downloads the standard AIStor binary
-for its architecture.
+`restart-and-license`. `aistor_binary_url` is required: each node downloads
+that exact AIStor binary during the install phase. Use the URL appropriate for
+the CPU architecture shared by the cluster nodes.
 
 Before running it, configure root's `mc` alias and place the license file on
 the selected `aistor_mc_control_host` only. The backup directory is also
