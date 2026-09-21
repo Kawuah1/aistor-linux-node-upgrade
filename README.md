@@ -84,8 +84,8 @@ Official procedure: <https://docs.min.io/aistor/administration/upgrade-aistor-se
 `playbook.yaml` implements the same sequence without configuring `mc` or
 aliases. It operates on every host in the `minio` inventory group: use the same
 file for a two-node, four-node, or larger cluster. Create an inventory with all
-target nodes in that group. The playbook runs all tasks as root, so root on the
-Ansible control host must already own the configured `mc` alias:
+target nodes in that group. The playbook runs all tasks as root and performs
+the once-only `mc` tasks over SSH on one explicitly chosen MinIO node:
 
 ```ini
 [minio]
@@ -99,6 +99,7 @@ minio-node-2 ansible_host=192.0.2.11
 ```sh
 sudo ansible-playbook -i inventory.ini playbook.yaml \
   -e aistor_upgrade_confirm_permanent=true \
+  -e aistor_mc_control_host=minio-node-1 \
   -e mc_alias=legacy-minio \
   -e aistor_license_file=/secure/minio.license \
   -e aistor_backup_dir=/secure/backups/minio-to-aistor
@@ -109,3 +110,7 @@ steps, add `-e aistor_upgrade_phase=backup`, then `install-binary`, and finally
 `restart-and-license`. `aistor_binary_file` takes precedence over
 `aistor_binary_url`; otherwise each node downloads the standard AIStor binary
 for its architecture.
+
+Before running it, configure root's `mc` alias and place the license file on
+the selected `aistor_mc_control_host` only. The backup directory is also
+created there. No other MinIO node needs `mc`, an alias, or a license file.
