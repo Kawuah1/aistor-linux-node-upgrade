@@ -78,3 +78,29 @@ and `mc admin cluster iam import`, followed by a cluster restart. Review the
 official troubleshooting guide before running any imports.
 
 Official procedure: <https://docs.min.io/aistor/administration/upgrade-aistor-server/open-source-minio/linux/>.
+
+## Ansible alternative
+
+`playbook.yaml` implements the same sequence without configuring `mc` or
+aliases. Create an inventory with both target nodes in a `minio` group, then
+run the playbook as the local user that already owns the configured `mc` alias:
+
+```ini
+[minio]
+minio-node-1 ansible_host=192.0.2.10
+minio-node-2 ansible_host=192.0.2.11
+```
+
+```sh
+ansible-playbook -i inventory.ini playbook.yaml \
+  -e aistor_upgrade_confirm_permanent=true \
+  -e mc_alias=legacy-minio \
+  -e aistor_license_file=/secure/minio.license \
+  -e aistor_backup_dir=/secure/backups/minio-to-aistor
+```
+
+By default this runs all phases. To run them in separate maintenance-window
+steps, add `-e aistor_upgrade_phase=backup`, then `install-binary`, and finally
+`restart-and-license`. `aistor_binary_file` takes precedence over
+`aistor_binary_url`; otherwise each node downloads the standard AIStor binary
+for its architecture.

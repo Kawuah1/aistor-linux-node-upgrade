@@ -1,0 +1,307 @@
+---
+# Convert the adjacent manual Bash runbook into an Ansible workflow.
+#
+# This playbook never configures mc or creates an mc alias. The user executing
+# ansible-playbook must already have a working local mc alias for this cluster.
+# Run with a normal Ansible user that can sudo on the MinIO nodes; do not use
+# sudo for ansible-playbook unless root owns the configured mc alias.
+- name: Upgrade legacy Linux MinIO nodes to AIStor
+  hosts: minio
+  gather_facts: true
+  become: true
+  serial: "100%"
+
+  vars:
+    # Safety control: set true explicitly at invocation time.
+    aistor_upgrade_confirm_permanent: false
+
+    # all performs backup, binary replacement on every node, then one cluster
+    # restart and license registration. Individual phases are useful when a
+    # change window spans multiple commands: backup, install-binary, or
+    # restart-and-license.
+    aistor_upgrade_phase: all
+
+    # Existing configuration on the target nodes.
+    minio_service_name: minio
+    minio_binary_path: /usr/local/bin/minio
+
+    # Existing local mc alias on the Ansible control host. No URL or
+    # credentials are accepted or configured by this playbook.
+    mc_alias: ""
+
+    # A durable, restricted location on the Ansible control host. The parent
+    # and timestamped final directory are created during the backup phase.
+    aistor_backup_dir: "/var/backups/minio-to-aistor-{{ ansible_date_time.iso8601_basic_short }}"
+
+    # Binary selection order:
+    # 1. aistor_binary_file (pre-approved local file on the CONTROL host)
+    # 2. aistor_binary_url (downloaded by each TARGET node)
+    # 3. the MinIO AIStor URL derived from each target architecture
+    aistor_binary_file: ""
+    aistor_binary_url: ""
+    aistor_arch_map:
+      x86_64: linux-amd64
+      aarch64: linux-arm64
+      arm64: linux-arm64
+    aistor_download_arch: "{{ aistor_arch_map.get(ansible_architecture, '') }}"
+    aistor_default_binary_url: "https://dl.min.io/aistor/minio/release/{{ aistor_download_arch }}/minio"
+
+    # Required only in restart-and-license/all mode; this file is local to the
+    # Ansible control host and is registered via mc cluster-wide.
+    aistor_license_file: ""
+
+  pre_tasks:
+    - name: Require explicit approval for permanent migration
+      ansible.builtin.assert:
+        that: aistor_upgrade_confirm_permanent | bool
+        fail_msg: >-
+          Upgrading open-source MinIO to AIStor is permanent. Set
+          aistor_upgrade_confirm_permanent=true only after reviewing backups
+          and the maintenance window.
+      run_once: true
+
+    - name: Validate requested phase
+      ansible.builtin.assert:
+        that: aistor_upgrade_phase in ['all', 'backup', 'install-binary', 'restart-and-license']
+        fail_msg: "aistor_upgrade_phase must be all, backup, install-binary, or restart-and-license."
+      run_once: true
+
+    - name: Require mc alias for controller-side phases
+      ansible.builtin.assert:
+        that: mc_alias | length > 0
+        fail_msg: "Set mc_alias to an alias already configured for the Ansible control user."
+      when: aistor_upgrade_phase in ['all', 'backup', 'restart-and-license']
+      run_once: true
+
+    - name: Verify existing mc alias on Ansible control host
+      ansible.builtin.command:
+        argv: [mc, alias, list, "{{ mc_alias }}"]
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup', 'restart-and-license']
+
+    - name: Require readable local license for final registration
+      ansible.builtin.stat:
+        path: "{{ aistor_license_file }}"
+      register: aistor_license_stat
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
+
+    - name: Assert local license is available
+      ansible.builtin.assert:
+        that: aistor_license_stat.stat.exists and aistor_license_stat.stat.readable
+        fail_msg: "Set aistor_license_file to a readable license file on the Ansible control host."
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
+
+    - name: Create metadata backup directory on Ansible control host
+      ansible.builtin.file:
+        path: "{{ aistor_backup_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Confirm cluster access before backup
+      ansible.builtin.command:
+        argv: [mc, admin, info, "{{ mc_alias }}"]
+      register: aistor_cluster_info_before
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Save pre-upgrade cluster information
+      ansible.builtin.copy:
+        content: "{{ aistor_cluster_info_before.stdout }}\n"
+        dest: "{{ aistor_backup_dir }}/pre-upgrade-cluster-info.txt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Export cluster configuration metadata
+      ansible.builtin.command:
+        argv: [mc, admin, config, export, "{{ mc_alias }}"]
+      register: aistor_config_export
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Save cluster configuration export
+      ansible.builtin.copy:
+        content: "{{ aistor_config_export.stdout }}"
+        dest: "{{ aistor_backup_dir }}/minio-config-export.txt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Export bucket metadata
+      ansible.builtin.command:
+        argv: [mc, admin, cluster, bucket, export, "{{ mc_alias }}"]
+        chdir: "{{ aistor_backup_dir }}"
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+    - name: Export IAM metadata
+      ansible.builtin.command:
+        argv: [mc, admin, cluster, iam, export, "{{ mc_alias }}", --output, "{{ aistor_backup_dir }}/{{ mc_alias }}-iam-info.zip"]
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'backup']
+
+  tasks:
+    - name: Verify node architecture is supported
+      ansible.builtin.assert:
+        that: aistor_download_arch | length > 0
+        fail_msg: "Unsupported architecture {{ ansible_architecture }} on {{ inventory_hostname }}."
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Check legacy MinIO service is running
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ minio_service_name }}"]
+      register: minio_service_status
+      changed_when: false
+      failed_when: minio_service_status.stdout != 'active'
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Check current MinIO binary
+      ansible.builtin.command:
+        argv: ["{{ minio_binary_path }}", --version]
+      changed_when: false
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Verify pre-approved local AIStor binary
+      ansible.builtin.stat:
+        path: "{{ aistor_binary_file }}"
+      register: aistor_binary_file_stat
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when:
+        - aistor_upgrade_phase in ['all', 'install-binary']
+        - aistor_binary_file | length > 0
+
+    - name: Require readable pre-approved local AIStor binary
+      ansible.builtin.assert:
+        that: aistor_binary_file_stat.stat.exists and aistor_binary_file_stat.stat.readable
+        fail_msg: "Cannot read aistor_binary_file on the Ansible control host."
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when:
+        - aistor_upgrade_phase in ['all', 'install-binary']
+        - aistor_binary_file | length > 0
+
+    - name: Copy pre-approved AIStor binary to nodes
+      ansible.builtin.copy:
+        src: "{{ aistor_binary_file }}"
+        dest: /tmp/aistor-minio
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - aistor_upgrade_phase in ['all', 'install-binary']
+        - aistor_binary_file | length > 0
+
+    - name: Download AIStor binary to nodes
+      ansible.builtin.get_url:
+        url: "{{ aistor_binary_url if aistor_binary_url | length > 0 else aistor_default_binary_url }}"
+        dest: /tmp/aistor-minio
+        owner: root
+        group: root
+        mode: "0755"
+      when:
+        - aistor_upgrade_phase in ['all', 'install-binary']
+        - aistor_binary_file | length == 0
+
+    - name: Validate downloaded AIStor binary
+      ansible.builtin.command:
+        argv: [/tmp/aistor-minio, --version]
+      changed_when: false
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Preserve legacy MinIO binary on each node
+      ansible.builtin.copy:
+        src: "{{ minio_binary_path }}"
+        dest: "{{ minio_binary_path }}.pre-aistor"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+        force: false
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Replace MinIO binary with AIStor without restarting nodes
+      ansible.builtin.copy:
+        src: /tmp/aistor-minio
+        dest: "{{ minio_binary_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+    - name: Report installed AIStor binary version
+      ansible.builtin.command:
+        argv: ["{{ minio_binary_path }}", --version]
+      changed_when: false
+      when: aistor_upgrade_phase in ['all', 'install-binary']
+
+  post_tasks:
+    - name: Restart all nodes simultaneously through existing mc alias
+      ansible.builtin.command:
+        argv: [mc, admin, service, restart, "{{ mc_alias }}"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
+
+    - name: Wait for cluster API after simultaneous restart
+      ansible.builtin.command:
+        argv: [mc, admin, info, "{{ mc_alias }}"]
+      register: aistor_cluster_info_after
+      changed_when: false
+      retries: 30
+      delay: 5
+      until: aistor_cluster_info_after.rc == 0
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
+
+    - name: Register AIStor license cluster-wide
+      ansible.builtin.command:
+        argv: [mc, license, register, "{{ mc_alias }}", --license, "{{ aistor_license_file }}"]
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
+
+    - name: Display post-upgrade cluster information
+      ansible.builtin.command:
+        argv: [mc, admin, info, "{{ mc_alias }}"]
+      changed_when: false
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: aistor_upgrade_phase in ['all', 'restart-and-license']
