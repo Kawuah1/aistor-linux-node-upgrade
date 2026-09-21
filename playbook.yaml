@@ -1,10 +1,10 @@
 ---
 # Convert the adjacent manual Bash runbook into an Ansible workflow.
 #
-# This playbook never configures mc or creates an mc alias. The user executing
-# ansible-playbook must already have a working local mc alias for this cluster.
-# Run with a normal Ansible user that can sudo on the MinIO nodes; do not use
-# sudo for ansible-playbook unless root owns the configured mc alias.
+# This playbook never configures mc or creates an mc alias. It runs all tasks,
+# including controller-side mc commands, with root privileges. Root on the
+# Ansible control host must already have a working local mc alias for this
+# cluster.
 - name: Upgrade legacy Linux MinIO nodes to AIStor
   hosts: minio
   gather_facts: true
@@ -78,7 +78,6 @@
         argv: [mc, alias, list, "{{ mc_alias }}"]
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup', 'restart-and-license']
 
@@ -87,7 +86,6 @@
         path: "{{ aistor_license_file }}"
       register: aistor_license_stat
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']
 
@@ -96,7 +94,6 @@
         that: aistor_license_stat.stat.exists and aistor_license_stat.stat.readable
         fail_msg: "Set aistor_license_file to a readable license file on the Ansible control host."
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']
 
@@ -106,7 +103,6 @@
         state: directory
         mode: "0700"
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -116,7 +112,6 @@
       register: aistor_cluster_info_before
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -126,7 +121,6 @@
         dest: "{{ aistor_backup_dir }}/pre-upgrade-cluster-info.txt"
         mode: "0600"
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -136,7 +130,6 @@
       register: aistor_config_export
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -146,7 +139,6 @@
         dest: "{{ aistor_backup_dir }}/minio-config-export.txt"
         mode: "0600"
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -156,7 +148,6 @@
         chdir: "{{ aistor_backup_dir }}"
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -165,7 +156,6 @@
         argv: [mc, admin, cluster, iam, export, "{{ mc_alias }}", --output, "{{ aistor_backup_dir }}/{{ mc_alias }}-iam-info.zip"]
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'backup']
 
@@ -195,7 +185,6 @@
         path: "{{ aistor_binary_file }}"
       register: aistor_binary_file_stat
       delegate_to: localhost
-      become: false
       run_once: true
       when:
         - aistor_upgrade_phase in ['all', 'install-binary']
@@ -206,7 +195,6 @@
         that: aistor_binary_file_stat.stat.exists and aistor_binary_file_stat.stat.readable
         fail_msg: "Cannot read aistor_binary_file on the Ansible control host."
       delegate_to: localhost
-      become: false
       run_once: true
       when:
         - aistor_upgrade_phase in ['all', 'install-binary']
@@ -272,7 +260,6 @@
       ansible.builtin.command:
         argv: [mc, admin, service, restart, "{{ mc_alias }}"]
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']
 
@@ -285,7 +272,6 @@
       delay: 5
       until: aistor_cluster_info_after.rc == 0
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']
 
@@ -293,7 +279,6 @@
       ansible.builtin.command:
         argv: [mc, license, register, "{{ mc_alias }}", --license, "{{ aistor_license_file }}"]
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']
 
@@ -302,6 +287,5 @@
         argv: [mc, admin, info, "{{ mc_alias }}"]
       changed_when: false
       delegate_to: localhost
-      become: false
       run_once: true
       when: aistor_upgrade_phase in ['all', 'restart-and-license']

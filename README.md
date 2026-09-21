@@ -84,8 +84,8 @@ Official procedure: <https://docs.min.io/aistor/administration/upgrade-aistor-se
 `playbook.yaml` implements the same sequence without configuring `mc` or
 aliases. It operates on every host in the `minio` inventory group: use the same
 file for a two-node, four-node, or larger cluster. Create an inventory with all
-target nodes in that group, then run the playbook as the local user that already
-owns the configured `mc` alias:
+target nodes in that group. The playbook runs all tasks as root, so root on the
+Ansible control host must already own the configured `mc` alias:
 
 ```ini
 [minio]
@@ -97,7 +97,7 @@ minio-node-2 ansible_host=192.0.2.11
 ```
 
 ```sh
-ansible-playbook -i inventory.ini playbook.yaml \
+sudo ansible-playbook -i inventory.ini playbook.yaml \
   -e aistor_upgrade_confirm_permanent=true \
   -e mc_alias=legacy-minio \
   -e aistor_license_file=/secure/minio.license \
