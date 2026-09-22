@@ -1,0 +1,36 @@
+---
+- name: Upgrade AIStor mc client
+  hosts: minio_nodes
+  become: true
+  gather_facts: false
+  vars:
+    mc_url: "https://s3.example.com/bucket/path/mc"
+    mc_tmp: "/tmp/mc"
+    mc_install_path: "/usr/local/bin/mc"
+  tasks:
+    - name: Download AIStor mc binary
+      ansible.builtin.get_url:
+        url: "{{ mc_url }}"
+        dest: "{{ mc_tmp }}"
+        mode: '0755'
+        force: true
+    - name: Install AIStor mc binary
+      ansible.builtin.copy:
+        src: "{{ mc_tmp }}"
+        dest: "{{ mc_install_path }}"
+        owner: root
+        group: root
+        mode: '0755'
+        remote_src: true
+    - name: Verify mc binary
+      ansible.builtin.command:
+        cmd: "{{ mc_install_path }} --version"
+      register: mc_version
+      changed_when: false
+    - name: Display installed mc version
+      ansible.builtin.debug:
+        msg: "{{ mc_version.stdout }}"
+    - name: Remove temporary mc binary
+      ansible.builtin.file:
+        path: "{{ mc_tmp }}"
+        state: absent
