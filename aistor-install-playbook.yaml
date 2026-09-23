@@ -1,0 +1,212 @@
+---
+# Fresh installation only. Do not use this playbook to upgrade an existing
+# MinIO deployment; use ../aistor-linux-node-upgrade/playbook.yaml instead.
+- name: Fresh-install MinIO AIStor on Ubuntu nodes
+  hosts: aistor
+  gather_facts: true
+  become: true
+  serial: "100%"
+
+  vars:
+    # Deliberate safety acknowledgement: this playbook writes the MinIO
+    # service configuration and starts a new deployment on these hosts.
+    aistor_fresh_install_confirm: false
+
+    # Required. Use the .deb URL matching the CPU architecture shared by all
+    # target hosts. Example AMD64 URL is in README.md.
+    aistor_package_url: ""
+
+    # Required secret values. Store these in an AWX credential or Ansible Vault,
+    # never in inventory or this playbook.
+    aistor_root_user: ""
+    aistor_root_password: ""
+    aistor_license_content: ""
+
+    # List the DNS names/IPs that every node can resolve and reach. Include
+    # every host in this deployment, in the same order on every invocation.
+    # This list is intentionally explicit: inventory aliases are not always
+    # usable as inter-node MinIO endpoints.
+    aistor_cluster_hosts: []
+    aistor_api_port: 9000
+    aistor_console_port: 9001
+
+    # Every listed path must already be a mounted storage path on EVERY node.
+    # The playbook refuses missing paths and does not partition, format, mount,
+    # or create storage directories.
+    aistor_drive_mounts: []
+
+    # Set only when Console is accessed through a DNS name, reverse proxy, or
+    # load balancer. Leave empty to omit MINIO_BROWSER_REDIRECT_URL.
+    aistor_browser_redirect_url: ""
+
+    # The official package creates this user/group and systemd unit.
+    aistor_service_name: minio
+    aistor_user: minio-user
+    aistor_group: minio-user
+    aistor_env_file: /etc/default/minio
+    aistor_license_path: /opt/minio/minio.license
+    aistor_package_path: /tmp/minio-aistor.deb
+
+    # Optional AIStor Client installation on every node. Set this to the
+    # correct architecture-specific mc URL if wanted; leave empty to skip.
+    aistor_mc_url: ""
+    aistor_mc_path: /usr/local/bin/mc
+
+  pre_tasks:
+    - name: Confirm fresh-install operation is intended
+      ansible.builtin.assert:
+        that: aistor_fresh_install_confirm | bool
+        fail_msg: >-
+          This playbook is for new AIStor deployments only. Set
+          aistor_fresh_install_confirm=true after confirming these are empty
+          target hosts and not an existing MinIO deployment.
+      run_once: true
+
+    - name: Require a supported Ubuntu target
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_service_mgr == 'systemd'
+        fail_msg: "{{ inventory_hostname }} must be an Ubuntu host using systemd."
+
+    - name: Require complete deployment configuration
+      ansible.builtin.assert:
+        that:
+          - aistor_package_url | length > 0
+          - aistor_root_user | length > 0
+          - aistor_root_password | length > 0
+          - aistor_license_content | length > 0
+          - aistor_cluster_hosts | length == groups['aistor'] | length
+          - aistor_cluster_hosts | length > 0
+          - aistor_drive_mounts | length > 0
+          - aistor_cluster_hosts | unique | length == aistor_cluster_hosts | length
+        fail_msg: >-
+          Set the package URL, root credentials, license content, an explicit
+          unique aistor_cluster_hosts list matching the aistor inventory size,
+          and one or more existing drive mounts.
+      run_once: true
+      no_log: true
+
+    - name: Refuse hosts with an active MinIO service
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ aistor_service_name }}"]
+      register: aistor_existing_service
+      changed_when: false
+      failed_when: false
+
+    - name: Assert target is not an active MinIO deployment
+      ansible.builtin.assert:
+        that: aistor_existing_service.stdout != 'active'
+        fail_msg: >-
+          {{ inventory_hostname }} already has an active MinIO service. Use
+          the upgrade runbook instead of this fresh-install playbook.
+
+    - name: Verify every configured drive path exists
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ aistor_drive_mounts }}"
+      register: aistor_drive_stats
+
+    - name: Require configured drive paths to be directories
+      ansible.builtin.assert:
+        that: item.stat.exists and item.stat.isdir
+        fail_msg: >-
+          {{ inventory_hostname }} storage path {{ item.item }} is missing or
+          is not a directory. Mount and verify the intended storage first.
+      loop: "{{ aistor_drive_stats.results }}"
+
+  tasks:
+    - name: Download the approved AIStor Ubuntu package
+      ansible.builtin.get_url:
+        url: "{{ aistor_package_url }}"
+        dest: "{{ aistor_package_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the AIStor Ubuntu package
+      ansible.builtin.apt:
+        deb: "{{ aistor_package_path }}"
+        state: present
+
+    - name: Verify package created the AIStor service account
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ aistor_user }}"
+
+    - name: Create AIStor license directory
+      ansible.builtin.file:
+        path: "{{ aistor_license_path | dirname }}"
+        state: directory
+        owner: "{{ aistor_user }}"
+        group: "{{ aistor_group }}"
+        mode: "0750"
+
+    - name: Install identical AIStor license on every node
+      ansible.builtin.copy:
+        content: "{{ aistor_license_content }}\n"
+        dest: "{{ aistor_license_path }}"
+        owner: "{{ aistor_user }}"
+        group: "{{ aistor_group }}"
+        mode: "0640"
+      no_log: true
+
+    - name: Build complete distributed volume endpoint list
+      ansible.builtin.set_fact:
+        aistor_volume_urls: "{{ (aistor_volume_urls | default([])) + ['http://' ~ item.0 ~ ':' ~ (aistor_api_port | string) ~ item.1 ~ '/minio'] }}"
+      loop: "{{ aistor_cluster_hosts | product(aistor_drive_mounts) | list }}"
+
+    - name: Write matching AIStor environment file on every node
+      ansible.builtin.template:
+        src: minio.env.j2
+        dest: "{{ aistor_env_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Give the AIStor service account ownership of storage paths
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ aistor_user }}"
+        group: "{{ aistor_group }}"
+        recurse: true
+      loop: "{{ aistor_drive_mounts }}"
+
+    - name: Install AIStor Client when an explicit URL is supplied
+      ansible.builtin.get_url:
+        url: "{{ aistor_mc_url }}"
+        dest: "{{ aistor_mc_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+      when: aistor_mc_url | length > 0
+
+    - name: Validate AIStor Server binary
+      ansible.builtin.command:
+        argv: [minio, --version]
+      changed_when: false
+
+  post_tasks:
+    - name: Enable and start AIStor service on every node
+      ansible.builtin.systemd_service:
+        name: "{{ aistor_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Wait for local AIStor live health endpoint
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ aistor_api_port }}/minio/health/live"
+        method: GET
+        status_code: 200
+      register: aistor_health
+      retries: 30
+      delay: 5
+      until: aistor_health.status == 200
+
+    - name: Display AIStor service status
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ aistor_service_name }}"]
+      changed_when: false
