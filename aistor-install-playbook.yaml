@@ -20,7 +20,12 @@
     # never in inventory or this playbook.
     aistor_root_user: ""
     aistor_root_password: ""
-    aistor_license_content: ""
+    # Required: an HTTPS S3 URL (typically a short-lived pre-signed URL) to
+    # the license file. The URL is fetched directly by every target node.
+    aistor_license_url: ""
+    # Strongly recommended: sha256:<expected SHA-256 digest>. Leave empty only
+    # when the source URL itself provides the required integrity control.
+    aistor_license_checksum: ""
 
     # List the DNS names/IPs that every node can resolve and reach. Include
     # every host in this deployment, in the same order on every invocation.
@@ -75,13 +80,13 @@
           - aistor_package_url | length > 0
           - aistor_root_user | length > 0
           - aistor_root_password | length > 0
-          - aistor_license_content | length > 0
+          - aistor_license_url is match('^https://')
           - aistor_cluster_hosts | length == groups['aistor'] | length
           - aistor_cluster_hosts | length > 0
           - aistor_drive_mounts | length > 0
           - aistor_cluster_hosts | unique | length == aistor_cluster_hosts | length
         fail_msg: >-
-          Set the package URL, root credentials, license content, an explicit
+          Set the package URL, root credentials, HTTPS license URL, an explicit
           unique aistor_cluster_hosts list matching the aistor inventory size,
           and one or more existing drive mounts.
       run_once: true
@@ -142,13 +147,14 @@
         group: "{{ aistor_group }}"
         mode: "0750"
 
-    - name: Install identical AIStor license on every node
-      ansible.builtin.copy:
-        content: "{{ aistor_license_content }}\n"
+    - name: Download identical AIStor license from S3 on every node
+      ansible.builtin.get_url:
+        url: "{{ aistor_license_url }}"
         dest: "{{ aistor_license_path }}"
         owner: "{{ aistor_user }}"
         group: "{{ aistor_group }}"
         mode: "0640"
+        checksum: "{{ aistor_license_checksum if aistor_license_checksum | length > 0 else omit }}"
       no_log: true
 
     - name: Build complete distributed volume endpoint list
@@ -157,8 +163,16 @@
       loop: "{{ aistor_cluster_hosts | product(aistor_drive_mounts) | list }}"
 
     - name: Write matching AIStor environment file on every node
-      ansible.builtin.template:
-        src: minio.env.j2
+      ansible.builtin.copy:
+        content: |
+          # Managed by Ansible. The contents must be identical on every AIStor node.
+          MINIO_ROOT_USER={{ aistor_root_user | to_json }}
+          MINIO_ROOT_PASSWORD={{ aistor_root_password | to_json }}
+          MINIO_LICENSE={{ aistor_license_path | to_json }}
+          MINIO_VOLUMES={{ aistor_volume_urls | join(' ') | to_json }}
+          {% if aistor_browser_redirect_url | length > 0 %}
+          MINIO_BROWSER_REDIRECT_URL={{ aistor_browser_redirect_url | to_json }}
+          {% endif %}
         dest: "{{ aistor_env_file }}"
         owner: root
         group: root
